@@ -10,7 +10,7 @@ from pettingzoo.butterfly import cooperative_pong_v4
 env = cooperative_pong_v4.parallel_env(ball_speed=9, left_paddle_speed=12, right_paddle_speed=12, cake_paddle=True, max_cycles=900, bounce_randomness=False, max_reward=100, off_screen_penalty=-10)
 
 
-class DQN:
+class RIAL:
 
     """ Implementation of deep q learning algorithm """
 
@@ -95,7 +95,7 @@ class DQN:
             self.epsilon *= self.epsilon_decay
 
 
-def train_dqn(model):
+def train_rial(model):
 
     loss = []
     episodes = 5000
@@ -126,5 +126,5 @@ def train_dqn(model):
     return loss
 
 if __name__ == "__main__":
-    shared_model = DQN(env.action_space.n, env.observation_space.shape[0])
-    train_dqn(shared_model)
+    shared_model = RIAL(env.action_space.n, env.observation_space.shape[0])
+    train_rial(shared_model)

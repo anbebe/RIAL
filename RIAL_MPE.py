@@ -1,9 +1,10 @@
 import gym
+from gym.spaces import Box, Discrete
 import pettingzoo
-from pettingzoo.mpe import simple_reference_v2
+from pettingzoo.mpe import simple_spread_v2
 import tensorflow as tf
 from tensorflow.keras import Sequential, Model
-from tensorflow.keras.layers import Dense, GRU, Embedding, Add, Concatenate, BatchNormalization
+from tensorflow.keras.layers import Dense, GRUCell, RNN, Embedding, Add, Concatenate, BatchNormalization
 from tensorflow.keras.optimizers import RMSprop
 from tensorflow.keras.activations import relu, linear
 import numpy as np
@@ -14,13 +15,10 @@ import random
 import datetime
 import time
 
-ACTIONS = ["no_action", "move_left", "move_right", "move_down", "move_up"]
-MESSAGES = ["say_0", "say_1", "say_2", "say_3", "say_4", "say_5", "say_6", "say_7", "say_8", "say_9"]
-
 
 
 class QNet(tf.keras.Model):
-    def __init__(self, action_space, state_space):
+    def __init__(self, action_space, hidden_size):
         '''
         RNN that maintains an internal state h, an input network producing a task embedding z and
         an output network for the q-values
@@ -43,15 +41,16 @@ class QNet(tf.keras.Model):
         self.emb_act = Embedding(input_dim=action_space, output_dim=128)
 
         # embedding for agent index
-        self.emb_ind = Embedding(input_dim=(None,2), output_dim= 128)
+        self.emb_ind = Embedding(input_dim=2, output_dim= 128)
 
         self.add = Add(dynamic=True)
         self.concat = Concatenate(dynamic=True)
 
         # 2-layer RNN with GRUs that outputs internal state, approximates agent's action-observation history
-        self.rnn = Sequential()
-        self.rnn.add(GRU(units=64, time_major=True))
-        self.rnn.add(GRU(units=128, time_major=True))
+        # work with GRU cell to input last hidden state
+        self.hidden_size = hidden_size
+        self.rnn1 = GRUCell(hidden_size)
+        self.rnn2 = GRUCell(hidden_size)
 
         # the output of the second layer used as input for 2-layer MLP that outputs Q-value
         self.q_net = Sequential()
@@ -62,76 +61,128 @@ class QNet(tf.keras.Model):
     @tf.function
     def call(self, input):
         '''
-        input: (last_zs, observation, last_action, last_message agent_ind)
-        should have shape [timesteps, batch_size, ..]
-        instead: save z of previous steps to keep timesteps for rnn
+        input: (observation, last_action, last_message, agent_ind)
+        each should have shape [ batch_size, specific ]
+        instead: hidden states from last timestep for both rnn cells
         '''
-        last_zs = input[0]
-        state = input[1]
-        last_act = input[2]
-        last_m = input[3]
+        state = input[0]
+        last_act = input[1]
+        last_m = input[2]
+        hidden = input[3]
         agent = input[4]
-
-        print("state: ", state)
-        x = tf.cast(state, 'float')
-        x = self.mlp(x)
-        print("x: ", x)
+        
+        x = self.mlp(state)
 
         last_m = tf.cast(last_m, 'float')
         last_m = self.mlp2(last_m)
+        #last_m = tf.reshape(last_m, [1,])
 
         last_act = tf.cast(last_act, 'float')
         last_act = self.emb_act(last_act)
-        last_act = tf.squeeze(last_act, axis=1)
-        print("last_act: ", last_act)
+        last_act = tf.reshape(last_act, [1,128])
 
         agent = tf.cast(agent, 'float')
         agent = self.emb_ind(agent)
-        agent = tf.squeeze(agent, axis=1)
-        print("agent: ", agent)
+        agent =  tf.reshape(agent, [1,128])
         
 
         z = self.add([x, last_act, last_m, agent])
-        print("z: ", z)
-        z = self.concat(z, last_zs)
-        rnn_output = self.rnn(z)
-        q = self.q_net(rnn_output)
-        return q, z
+        hidden_1, _  = self.rnn1(inputs=z, states = hidden[0])
+        hidden_2,_ = self.rnn2(inputs=hidden_1, states = hidden[1])
+        q = self.q_net(hidden_2)
+        return q, hidden_1, hidden_2
 
 
 class Agent():
 
     """ Implementation of deep q learning algorithm """
 
-    def __init__(self, action_space, state_space):
+    def __init__(self, state_space, action_space):
 
         self.action_space = action_space
+        #TODO: look at communication space
+        #self.message_space = Box(low=-1.0, high=2.0, shape=(action_space.n), dtype=np.float32)
+        self.message_space = Discrete(action_space).n
         self.state_space = state_space
         self.epsilon = 0.05                # initial value of epsilon for e-greedy policy
         self.gamma = 1                  # discount factor
         self.lr = 0.0005                   # learning rate of the model
-        self.action_model = QNet(self.action_space, self.state_space)
-        self.target_model = QNet(self.action_space, self.state_space)
-        self.update_target_network()
+        self.hidden_space = (100)           # size of hidden state from rnn model
+        self.action_model = QNet(self.action_space, self.hidden_space)
+        self.t_action_model = QNet(self.action_space, self.hidden_space)
+        self.message_model = QNet(self.action_space, self.hidden_space)
+        self.t_message_model = QNet(self.action_space, self.hidden_space)
+        #self.update_target_networks()
 
         log_dir = "logs/fit/" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
         self.tensorboard_callback = tf.keras.callbacks.TensorBoard(log_dir=log_dir, histogram_freq=1)
 
 
-    def choose_action(self,last_zs, next_state, action, agent_ind):
+    def choose_action(self, next_state, action, message, hidden, agent_ind):
         '''
-        choose an action based on the epsilon-greedy policy, input: (observation, action, agent_ind)
+        choose an action based on the epsilon-greedy policy
         '''
         if np.random.rand() <= self.epsilon:
-            return random.randrange(self.action_space)
+            return random.randrange(self.action_space), hidden
+        if hidden == None:
+            hidden = [self.message_model.rnn1.get_initial_state(batch_size=1, dtype=float).numpy(), self.message_model.rnn2.get_initial_state(batch_size=1, dtype=float).numpy()]
+        action = np.expand_dims(np.array([action]), axis=0)
+        message = np.expand_dims(np.array([message]), axis=0)
+        agent_ind = np.array([agent_ind])
+        input = (np.asarray(next_state), action, message, hidden, agent_ind)
+        act_values, hidden_1, hidden_2 = self.action_model.predict(input)
+        # use softmax to turn logit into probabilities
+        return np.argmax(tf.nn.softmax(act_values[0])), [hidden_1, hidden_2]
+
+    def choose_first_action(self):
+        '''
+        choose an action based on the epsilon-greedy policy for the first step
+        '''
+        #TODO make it work with model
+        '''
+        last_action = np.asarray([0])
+        last_message = np.asarray([0])
+        hidden_action = np.asarray([[]])
+        hidden_message = np.asarray([[]])
         action = np.expand_dims(action, axis=0)
-        act_values = self.action_model.predict((last_zs, next_state, action, agent_ind))
-        return np.argmax(act_values[0])
+        act_values, hidden_1, hidden_2 = self.action_model.predict((next_state, action, last_m, hidden, agent_ind))
+        # use softmax to turn loit into probabilities
+        return np.argmax(tf.nn.softmax(act_values[0])), [hidden_1, hidden_2]
+        '''
+        return random.randrange(self.action_space)
+
+    def choose_message(self, next_state, action, message, hidden, agent_ind):
+        '''
+        choose a message based on the epsilon-greedy policy
+        '''
+        if np.random.rand() <= self.epsilon:
+            return random.randrange(self.message_space), hidden
+        if hidden == None:
+            hidden = [self.message_model.rnn1.get_initial_state(batch_size=1, dtype=float).numpy(), self.message_model.rnn2.get_initial_state(batch_size=1, dtype=float).numpy()]
+        action = np.expand_dims(np.array([action]), axis=0)
+        message = np.expand_dims(np.array([message]), axis=0)
+        agent_ind = np.array([agent_ind])
+        input = (np.asarray(next_state), action, message, hidden, agent_ind)
+        m_values, hidden_1, hidden_2 = self.message_model.predict(input)
+        return np.argmax(tf.nn.softmax(m_values[0])), [hidden_1, hidden_2]
+
+    def choose_first_message(self):
+        '''
+        choose a message based on the epsilon-greedy policy
+        '''
+        '''if np.random.rand() <= self.epsilon:
+            
+        #message = np.expand_dims(message, axis=0)
+        m_values, hidden_1, hidden_2 = self.message_model.predict((next_state, action, message, hidden, agent_ind))
+        return np.argmax(tf.nn.softmax(m_values[0])), [hidden_1, hidden_2]
+        '''
+        return random.randrange(self.message_space)
 
     def update(self, memory, agent_ind, batch_size=1):
         '''
-        input to model: (observation, last_action, agent_ind)
+        input to model: (memory: [state, action, message, reward, next_state, last_action, done] for batch_size)
         '''
+        #TODO: update update to memory, messages and hidden state
         states = memory[:,:,0]
         actions = memory[:,:,1]
         rewards = memory[:,:,2]
@@ -157,79 +208,84 @@ class Agent():
         return error
 
     
-    def update_target_network(self):
-        self.target_model.set_weights(self.action_model.get_weights())
+    def update_target_networks(self):
+        self.t_action_model.set_weights(self.action_model.get_weights())
+        self.t_message_model.set_weights(self.message_model.get_weights())
 
 
-def train_rial(episode, obs_space, act_space):
+def train_rial(episode, obs_space, act_space, batch_size):
     loss = []
-    rial = Agent(act_space, obs_space)
+    rial = Agent(obs_space, act_space)
     for e in range(episode):
         print("episode: ", e)
-        #TODO: reset agents?
-        for env in envs:
-          env.reset()
-        time_memory = [] # to save the timsteps
-        score = 0
-        done = False
-        render = False
-        env_ind = 0
-        env = envs[0]
-        start = True
-        # memory should have shape (timesteps, batch_size, episode_info)
+        # memory should have shape (batch_size, timesteps, episode_info)
         memory = []
-        # env.agent_iter iterates over the two agents until both are finished
-        # take only one action per agent, save in memory and update after every env is done
-        for agent in env.agent_iter():
-            if done:
-                break
+        #TODO: reset agents?
+        # sample batch size through finishing this amount of episodes
+        for b in range(batch_size):
+            env.reset()
+            score = 0
+            done = False
+            start = True
+            last_message = None
+            last_action = None
+            batch_memory = []
+            # env.agent_iter iterates over the two agents until both are finished or max_cycles is reached
+            step = 1
+            for agent in env.agent_iter():
+                if done:
+                    break
             
-            agent_ind = np.asarray([[[int(agent[-1])]]])
-            print("env: ", env_ind, "agent: ", agent_ind)
-            
+                agent_ind = np.asarray([int(agent[-1])])
+                print("step ", step)
 
-            # if the episode starts, there is no memory from last states:
-            if start:
                 state = env.last(observe=True)[0]
-                state = state[np.newaxis, np.newaxis, :]
-                last_action = np.array([[[]]])
-            else:
-                state = time_memory[:,env_ind,3]
-                last_action = time_memory[:,env_ind,1]
-                
+                state = state[np.newaxis, :]
+            
+                # if the episode starts, there is no memory from last states:
+                if start:
+                    message = rial.choose_first_message()
+                    action = rial.choose_first_action()
+                    hidden_message = None
+                    hidden_action = None
+                    start = False
+                else:
+                    last_action = batch_memory[-1][1]
+                    last_message = batch_memory[-1][2]
+                    hidden_message = batch_memory[-1][5]
+                    hidden_action = batch_memory[-1][6]
+                    message, hidden_message = rial.choose_message(state,last_action, last_message, hidden_message, agent_ind)
+                    action, hidden_action = rial.choose_action(state,last_action, last_message, hidden_action, agent_ind)
 
-            action = rial.choose_action(state,last_action, agent_ind)
-            env.step(action)
-            next_state, reward, done, info = env.last(observe=True)
-            next_state = np.expand_dims(next_state, axis=0)
-            score += reward
-            memory.append([state, action, reward, next_state, last_action, done])
-            if env_ind < len(envs) - 1:
-                env_ind += 1
-            else:
-                time_memory.append(memory)
-                error = rial.update(time_memory, agent_ind)
-                env_ind = 0
-                memory = []
-                start = False
-            env = envs[env_ind]
+                print("action: ", action)
+                print("message: ", message)
+
+                env.step(action)
+                next_state, reward, done, _ = env.last(observe=True)
+                next_state = np.expand_dims(next_state, axis=0)
+                score += reward
+                batch_memory.append([state, action, message, reward, next_state, hidden_message, hidden_action, done])
+                step += 1
+
+        # TODO
+        error = rial.update(memory, agent_ind)
             
         print("episode: {}/{}, score: {}".format(e, episode, score/episode))
         loss.append(score)
 
         if e % 100 == 0:
             print("100 episodes reached")
-            #TODO: update to timesteps saved
+            #TODO: update to training process - timesteps, message
             rial.update_target_network()
             # show one episode in one environment for visualization of training
             frame_list = []
-            envs[0].reset()
-            for agent in envs[0].agent_iter():
+            env.reset()
+            for agent in env.agent_iter():
               state_ = env.last()[0]
               state_ = np.expand_dims(state_, axis=0)
               action_ = rial.choose_action(state,action_, agent_ind)
               env.step(action_)
-              envs[0].render(mode='rgb_array')
+              env.render(mode='rgb_array')
               time.sleep(0.05)
 
 
@@ -242,12 +298,11 @@ def train_rial(episode, obs_space, act_space):
     return loss
 
 batch_size = 32
-envs = [simple_reference_v2.env(local_ratio=0.5, max_cycles=25, continuous_actions=False) for _ in range(batch_size)]
-print(envs[0].observation_space('agent_0').shape)
-print(envs[0].action_space('agent_0').n)
-obs_space = envs[0].observation_space('agent_0').shape
-act_space = envs[0].action_space('agent_0').n
+env = simple_spread_v2.env(N=2, local_ratio=0.5, max_cycles=25, continuous_actions=False)
+
+obs_space = env.observation_space('agent_0').shape
+act_space = env.action_space('agent_0').n
 episodes = 200
-loss = train_rial(episodes, obs_space, act_space)
+loss = train_rial(episodes, obs_space, act_space, batch_size=batch_size)
 
         
