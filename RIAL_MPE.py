@@ -1,3 +1,4 @@
+from email import message
 import gym
 from gym.spaces import Box, Discrete
 import pettingzoo
@@ -59,7 +60,7 @@ class QNet(tf.keras.Model):
 
 
     @tf.function
-    def call(self, input):
+    def call(self, input, training=False):
         '''
         input: (observation, last_action, last_message, agent_ind)
         each should have shape [ batch_size, specific ]
@@ -69,7 +70,7 @@ class QNet(tf.keras.Model):
         last_act = input[1]
         last_m = input[2]
         hidden = input[3]
-        agent = input[4]
+        agent = input[4]        
         
         x = self.mlp(state)
 
@@ -79,14 +80,20 @@ class QNet(tf.keras.Model):
 
         last_act = tf.cast(last_act, 'float')
         last_act = self.emb_act(last_act)
-        last_act = tf.reshape(last_act, [1,128])
 
         agent = tf.cast(agent, 'float')
         agent = self.emb_ind(agent)
-        agent =  tf.reshape(agent, [1,128])
-        
 
+        if training:
+            # for testing batch_size=32, now 5
+            last_act = tf.reshape(last_act, [5,128])
+            agent =  tf.reshape(agent, [5,128])
+        else:
+            last_act = tf.reshape(last_act, [1,128])
+            agent =  tf.reshape(agent, [1,128])
+        
         z = self.add([x, last_act, last_m, agent])
+
         hidden_1, _  = self.rnn1(inputs=z, states = hidden[0])
         hidden_2,_ = self.rnn2(inputs=hidden_1, states = hidden[1])
         q = self.q_net(hidden_2)
@@ -126,11 +133,8 @@ class Agent():
             return random.randrange(self.action_space), hidden
         if hidden == None:
             hidden = [self.message_model.rnn1.get_initial_state(batch_size=1, dtype=float).numpy(), self.message_model.rnn2.get_initial_state(batch_size=1, dtype=float).numpy()]
-        action = np.expand_dims(np.array([action]), axis=0)
-        message = np.expand_dims(np.array([message]), axis=0)
-        agent_ind = np.array([agent_ind])
         input = (np.asarray(next_state), action, message, hidden, agent_ind)
-        act_values, hidden_1, hidden_2 = self.action_model.predict(input)
+        act_values, hidden_1, hidden_2 = self.action_model(input, training=False)
         # use softmax to turn logit into probabilities
         return np.argmax(tf.nn.softmax(act_values[0])), [hidden_1, hidden_2]
 
@@ -159,11 +163,8 @@ class Agent():
             return random.randrange(self.message_space), hidden
         if hidden == None:
             hidden = [self.message_model.rnn1.get_initial_state(batch_size=1, dtype=float).numpy(), self.message_model.rnn2.get_initial_state(batch_size=1, dtype=float).numpy()]
-        action = np.expand_dims(np.array([action]), axis=0)
-        message = np.expand_dims(np.array([message]), axis=0)
-        agent_ind = np.array([agent_ind])
         input = (np.asarray(next_state), action, message, hidden, agent_ind)
-        m_values, hidden_1, hidden_2 = self.message_model.predict(input)
+        m_values, hidden_1, hidden_2 = self.message_model(input, training=False)
         return np.argmax(tf.nn.softmax(m_values[0])), [hidden_1, hidden_2]
 
     def choose_first_message(self):
@@ -178,34 +179,48 @@ class Agent():
         '''
         return random.randrange(self.message_space)
 
-    def update(self, memory, agent_ind, batch_size=1):
+    def update(self, memory, batch_size=1):
         '''
-        input to model: (memory: [state, action, message, reward, next_state, last_action, done] for batch_size)
+        input to model: (memory: batch_size , timesteps, [state, action, message, reward, next_state, hidden_message, hidden_action, dones)
+        start batch from second step to have last action
         '''
-        #TODO: update update to memory, messages and hidden state
-        states = memory[:,:,0]
-        actions = memory[:,:,1]
-        rewards = memory[:,:,2]
-        next_states = memory[:,:,3]
-        last_actions = memory[:,:,4]
-        dones = memory[:,:,5]
-        pred = self.target_model.predict((next_states, actions, agent_ind))
-        max_ind = np.argmax(pred)
+        memory = np.asarray(memory)
+        # count backwards from T to 1 steps per episode
+        for s in range(memory.shape[1])[:1:-1]:
 
-        targets = rewards + self.gamma*(np.amax(pred, axis=1))*(1-dones)
+            states = memory[:,s,0]
+            actions = np.asarray(memory[:,s,1]).astype('float32')
+            messages = np.asarray(memory[:,s,2]).astype('float32')
+            rewards = memory[:,s,3]
+            next_states = memory[:,s,4]
+            hidden_message = memory[:,s,5]
+            hidden_action = memory[:,s,6]
+            dones = memory[:,s,7]
+            agent_inds = np.asarray(memory[:,s,8]).astype('float32')
+            last_actions = memory[:,s-1,1]
+            last_messages = memory[:,s-1,2]
+            last_hidden_action = memory[:,s-1,6]
+            last_hidden_message = memory[:,s-1,5]
 
-        #with tf.GradientTape() as tape:
-        q_vals = self.action_model.predict_on_batch((states,last_actions, agent_ind))
-        error = targets - q_vals[0][max_ind]
-        #loss = tf.keras.losses.MeanSquaredError()(targets, q_vals[0][max_ind])
+            # update action QNet
 
-        #TODO: now fits all values, but only the max of q and the target are necessary
-        self.action_model.fit((states,last_actions, agent_ind), targets, batch_size=batch_size, validation_data=((states,last_actions, agent_ind), targets), callbacks=[self.tensorboard_callbacks])
+            with tf.GradientTape() as tape:
+                pred = self.t_action_model.predict((next_states, actions, messages, hidden_action, agent_inds))
+                pred = tf.nn.softmax(pred[0])
+                max_ind = np.argmax(pred)
 
-        #gradients = tape.gradient(loss, self.action_model.trainable_variables)
-        #self.action_model.optimizer.apply_gradients(zip(gradients, self.action_model.trainable_variables))
+                targets = rewards + self.gamma*(np.amax(pred, axis=1))*(1-dones)
+                q_vals = self.action_model.predict((states,last_actions, last_messages, last_hidden_action))
+                #error = targets - q_vals[:,max_ind]
+                loss = tf.keras.losses.MeanSquaredError()(targets, q_vals[:,max_ind])
 
-        return error
+            #self.action_model.train_on_batch((states,last_actions, ), targets, batch_size=batch_size, validation_data=((states,last_actions, agent_ind), targets), callbacks=[self.tensorboard_callbacks])
+            gradients = tape.gradient(loss, self.action_model.trainable_variables)
+            self.action_model.optimizer.apply_gradients(zip(gradients, self.action_model.trainable_variables))
+
+            # TODO: update message network
+
+        return loss
 
     
     def update_target_networks(self):
@@ -237,6 +252,7 @@ def train_rial(episode, obs_space, act_space, batch_size):
                     break
             
                 agent_ind = np.asarray([int(agent[-1])])
+                agent_ind = np.array([agent_ind])
                 print("step ", step)
 
                 state = env.last(observe=True)[0]
@@ -254,21 +270,32 @@ def train_rial(episode, obs_space, act_space, batch_size):
                     last_message = batch_memory[-1][2]
                     hidden_message = batch_memory[-1][5]
                     hidden_action = batch_memory[-1][6]
+
+                    last_action = np.expand_dims(np.array([last_action]), axis=0)
+                    last_message = np.expand_dims(np.array([last_message]), axis=0)
+                    
+
                     message, hidden_message = rial.choose_message(state,last_action, last_message, hidden_message, agent_ind)
                     action, hidden_action = rial.choose_action(state,last_action, last_message, hidden_action, agent_ind)
 
-                print("action: ", action)
-                print("message: ", message)
+                #print("action: ", action)
+                #print("message: ", message)
 
                 env.step(action)
                 next_state, reward, done, _ = env.last(observe=True)
                 next_state = np.expand_dims(next_state, axis=0)
+                reward = np.expand_dims(np.asarray([reward]), axis=0)
+                done = np.expand_dims(np.asarray([done]), axis=0)
+                action = np.expand_dims(np.asarray([action]), axis=0)
+                message = np.expand_dims(np.asarray([message]), axis=0)
                 score += reward
-                batch_memory.append([state, action, message, reward, next_state, hidden_message, hidden_action, done])
+                batch_memory.append([state, action, message, reward, next_state, hidden_message, hidden_action, done, agent_ind])
                 step += 1
+            memory.append(batch_memory)
 
         # TODO
-        error = rial.update(memory, agent_ind)
+        print("----- begin update ------")
+        error = rial.update(memory, batch_size=batch_size)
             
         print("episode: {}/{}, score: {}".format(e, episode, score/episode))
         loss.append(score)
@@ -297,7 +324,7 @@ def train_rial(episode, obs_space, act_space, batch_size):
         print("Average over last 100 episode: {0:.2f} \n".format(is_solved))
     return loss
 
-batch_size = 32
+batch_size = 5 # normally 32 for testing 5
 env = simple_spread_v2.env(N=2, local_ratio=0.5, max_cycles=25, continuous_actions=False)
 
 obs_space = env.observation_space('agent_0').shape
