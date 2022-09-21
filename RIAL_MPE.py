@@ -61,52 +61,36 @@ class QNet(tf.keras.Model):
 
 
     @tf.function
-    def call(self, input, training=False):
+    def call(self, input):
         '''
         input: (observation, last_action, last_message, agent_ind)
         each should have shape [ batch_size, specific ]
         instead: hidden states from last timestep for both rnn cells
         '''
         batch_size = input[0].shape[0]
-        print("bach size: ", batch_size)
-        print("input: ", input)
         state = input[0]
-        print("state: ", state)
         last_act = input[1]
-        print("last_act: ", last_act)
         last_m = input[2]
-        print("last_m: ", last_m)
         hidden = input[4]
         # assert that hidden has shape (batch_size, 2, 100)
-        print("hidden: ", hidden)
         hidden = tf.transpose(hidden, [1,0,2])
-        print("hidden: ", hidden)
         agent = input[3]      
-        print("agent: ", agent)  
         
         x = self.mlp(state)
-        print("x: ", x)
 
         last_m = tf.cast(last_m, 'float')
         last_m = self.mlp2(last_m)
-        print("last_m: ", last_m)
-        #last_m = tf.reshape(last_m, [1,])
 
         last_act = tf.cast(last_act, 'float')
         last_act = self.emb_act(last_act)
-        print("last_act: ", last_act)
 
         agent = tf.cast(agent, 'float')
         agent = self.emb_ind(agent)
-        print("agent: ", agent)
 
         last_act = tf.reshape(last_act, [batch_size,128])
         agent =  tf.reshape(agent, [batch_size,128])
         
         z = self.add([x, last_act, last_m, agent])
-        print("z: ", z)
-
-        print(hidden[0])
 
         hidden_1, _  = self.rnn1(inputs=z, states = hidden[0])
         hidden_2,_ = self.rnn2(inputs=hidden_1, states = hidden[1])
@@ -133,6 +117,7 @@ class Agent():
         self.t_action_model = QNet(self.action_space, self.hidden_space)
         self.message_model = QNet(self.action_space, self.hidden_space)
         self.t_message_model = QNet(self.action_space, self.hidden_space)
+        self.mse_loss = tf.keras.losses.MeanSquaredError()
         #self.update_target_networks()
 
         log_dir = "logs/fit/" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -143,12 +128,11 @@ class Agent():
         '''
         choose an action based on the epsilon-greedy policy
         '''
+        if hidden == None:
+            hidden = [self.action_model.rnn1.get_initial_state(batch_size=1, dtype=float).numpy(), self.action_model.rnn2.get_initial_state(batch_size=1, dtype=float).numpy()]
         if np.random.rand() <= self.epsilon:
             return random.randrange(self.action_space), hidden
-        if hidden == None:
-            hidden = np.asarray([self.action_model.rnn1.get_initial_state(batch_size=1, dtype=float).numpy(), self.action_model.rnn2.get_initial_state(batch_size=1, dtype=float).numpy()]).swapaxes(0,1)
-        else:
-            hidden = np.asarray(hidden).swapaxes(0,1)
+        hidden = np.asarray(hidden).swapaxes(0,1)
         input = tuple([np.asarray([next_state]), to_ext_numpy(action), to_ext_numpy(message), np.asarray([agent_ind])] + [hidden])
         act_values, hidden_1, hidden_2 = self.action_model(input, training=False)
         # use softmax to turn logit into probabilities
@@ -175,12 +159,11 @@ class Agent():
         '''
         choose a message based on the epsilon-greedy policy
         '''
+        if hidden == None:
+            hidden = [self.message_model.rnn1.get_initial_state(batch_size=1, dtype=float).numpy(), self.message_model.rnn2.get_initial_state(batch_size=1, dtype=float).numpy()]
         if np.random.rand() <= self.epsilon:
             return random.randrange(self.message_space), hidden
-        if hidden == None:
-            hidden = np.asarray([self.message_model.rnn1.get_initial_state(batch_size=1, dtype=float).numpy(), self.message_model.rnn2.get_initial_state(batch_size=1, dtype=float).numpy()]).swapaxes(0,1)
-        else:
-            hidden = np.asarray(hidden).swapaxes(0,1)
+        hidden = np.asarray(hidden).swapaxes(0,1)
         input = tuple([np.asarray([next_state]), to_ext_numpy(action), to_ext_numpy(message), np.asarray([agent_ind])] + [hidden])
         m_values, hidden_1, hidden_2 = self.message_model(input, training=False)
         return np.argmax(tf.nn.softmax(m_values[0])), [hidden_1.numpy(), hidden_2.numpy()]
@@ -223,24 +206,28 @@ class Agent():
             # update action QNet
 
             with tf.GradientTape() as tape:
-                pred, _, _ = self.t_action_model.predict((next_states, actions, messages, agent_inds, hidden_action))
-                pred_prob = tf.nn.softmax(pred)
-                max_inds = np.argmax(pred_prob, axis=1)
+                pred, _, _ = self.t_action_model((next_states, actions, messages, agent_inds, hidden_action))
+                targets = rewards + self.gamma*(tf.math.reduce_max(pred, axis=1))*(1-dones.squeeze())
+                q_vals, _, _ = self.action_model((states,last_actions, last_messages, agent_inds, last_hidden_action))
+                q_inds = tf.one_hot(actions.squeeze(), self.action_space)
+                exp_q = tf.reduce_sum(tf.multiply(q_vals, q_inds), axis=1)
+                a_loss = self.mse_loss(targets, exp_q)
 
-                targets = rewards + self.gamma*(np.amax(pred, axis=1))*(1-dones.squeeze())
-                q_vals, _, _ = self.action_model.predict((states,last_actions, last_messages, agent_inds, last_hidden_action))
-                #error = targets - q_vals[:,max_ind]
-                inds = np.stack((np.arange(batch_size),  max_inds), axis = 1)
-                exp_q = np.array([q_vals[ind1, ind2] for ind1, ind2 in inds])
-                loss = tf.keras.losses.MeanSquaredError()(targets, exp_q)
-
-            #self.action_model.train_on_batch((states,last_actions, ), targets, batch_size=batch_size, validation_data=((states,last_actions, agent_ind), targets), callbacks=[self.tensorboard_callbacks])
-            gradients = tape.gradient(loss, self.action_model.trainable_variables)
+            gradients = tape.gradient(a_loss, self.action_model.trainable_variables)
             self.action_model.optimizer.apply_gradients(zip(gradients, self.action_model.trainable_variables))
+                
+            with tf.GradientTape() as tape:   
+                pred, _, _ = self.t_message_model((next_states, actions, messages, agent_inds, hidden_message))
+                targets = rewards + self.gamma*(tf.math.reduce_max(pred, axis=1))*(1-dones.squeeze())
+                q_vals, _, _ = self.message_model((states,last_actions, last_messages, agent_inds, last_hidden_message))
+                q_inds = tf.one_hot(messages.squeeze(), self.action_space)
+                exp_q = tf.reduce_sum(tf.multiply(q_vals, q_inds), axis=1)
+                m_loss = self.mse_loss(targets, exp_q)
 
-            # TODO: update message network
+            gradients = tape.gradient(m_loss, self.message_model.trainable_variables)
+            self.message_model.optimizer.apply_gradients(zip(gradients, self.message_model.trainable_variables))
 
-        return loss
+        return a_loss, m_loss
 
     
     def update_target_networks(self):
@@ -261,6 +248,7 @@ def train_rial(episode, obs_space, act_space, batch_size):
         print("episode: ", e)
         # memory should have shape (batch_size, timesteps, episode_info)
         memory = []
+        b_score = 0
         #TODO: reset agents?
         # sample batch size through finishing this amount of episodes
         for b in range(batch_size):
@@ -274,16 +262,11 @@ def train_rial(episode, obs_space, act_space, batch_size):
             # env.agent_iter iterates over the two agents until both are finished or max_cycles is reached
             step = 1
             for agent in env.agent_iter():
+
                 if done:
                     break
-                
                 agent_ind = [int(agent[-1])]
-                #agent_ind = np.asarray([int(agent[-1])])
-                #agent_ind = np.array([agent_ind])
-                print("step ", step)
-
                 state = env.last(observe=True)[0]
-                #state = state[np.newaxis, :]
             
                 # if the episode starts, there is no memory from last states:
                 if start:
@@ -298,57 +281,67 @@ def train_rial(episode, obs_space, act_space, batch_size):
                     hidden_message = batch_memory[-1][5]
                     hidden_action = batch_memory[-1][6]
 
-                    #last_action = np.expand_dims(np.array([last_action]), axis=0)
-                    #last_message = np.expand_dims(np.array([last_message]), axis=0)
-                    
-
-                    message, hidden_message = rial.choose_message(state.tolist(),last_action, last_message, hidden_message, agent_ind)
+                    message, hidden_message = rial.choose_message(state,last_action, last_message, hidden_message, agent_ind)
                     action, hidden_action = rial.choose_action(state,last_action, last_message, hidden_action, agent_ind)
-
-                #print("action: ", action)
-                #print("message: ", message)
 
                 env.step(action)
                 next_state, reward, done, _ = env.last(observe=True)
-                #next_state = np.expand_dims(next_state, axis=0)
-                #reward = np.expand_dims(np.asarray([reward]), axis=0)
-                #done = np.expand_dims(np.asarray([done]), axis=0)
-                #action = np.expand_dims(np.asarray([action]), axis=0)
-                #message = np.expand_dims(np.asarray([message]), axis=0)
                 score += reward
                 #save each feature as list, not numpy array
                 batch_memory.append([state.tolist(), action, message, reward, next_state.tolist(), hidden_message, hidden_action, done, agent_ind])
                 step += 1
+            b_score += score
             memory.append(batch_memory)
 
-        # TODO
-        print("----- begin update ------")
-        error = rial.update(memory, batch_size=batch_size)
-            
-        print("episode: {}/{}, score: {}".format(e, episode, score/episode))
-        loss.append(score)
+        b_score = b_score/batch_size
 
-        if e % 100 == 0:
+        print("----- begin update ------")
+        a_loss, m_loss = rial.update(memory, batch_size=batch_size)
+            
+        print("episode: {}/{}, score: {}".format(e, episode, b_score))
+        loss.append(b_score)
+
+        if e % 5 == 0 :
+            # TODO
             print("100 episodes reached")
-            #TODO: update to training process - timesteps, message
-            rial.update_target_network()
+            rial.update_target_networks()
             # show one episode in one environment for visualization of training
             frame_list = []
             env.reset()
+            test_memory = []
             for agent in env.agent_iter():
-              state_ = env.last()[0]
-              state_ = np.expand_dims(state_, axis=0)
-              action_ = rial.choose_action(state,action_, agent_ind)
-              env.step(action_)
-              env.render(mode='rgb_array')
-              time.sleep(0.05)
+                if done:
+                    break
+                agent_ind = [int(agent[-1])]
+                state = env.last(observe=True)[0]
+            
+                # if the episode starts, there is no memory from last states:
+                if start:
+                    message = rial.choose_first_message()
+                    action = rial.choose_first_action()
+                    hidden_message = None
+                    hidden_action = None
+                    start = False
+                else:
+                    last_action = test_memory[-1][1]
+                    last_message = test_memory[-1][2]
+                    hidden_message = test_memory[-1][5]
+                    hidden_action = test_memory[-1][6]
+
+                message, hidden_message = rial.choose_message(state.tolist(),last_action, last_message, hidden_message, agent_ind)
+                action, hidden_action = rial.choose_action(state,last_action, last_message, hidden_action, agent_ind)
+
+                env.step(action)
+                next_state, reward, done, _ = env.last(observe=True)
+                score += reward
+                test_memory.append([state.tolist(), action, message, reward, next_state.tolist(), hidden_message, hidden_action, done, agent_ind])
+                step += 1
+
+                env.render(mode='rgb_array')
 
 
         # Average score of last 100 episode
         is_solved = np.mean(loss[-100:])
-        if is_solved > 200:
-            print('\n Task Completed! \n')
-            break
         print("Average over last 100 episode: {0:.2f} \n".format(is_solved))
     return loss
 
@@ -357,7 +350,7 @@ env = simple_spread_v2.env(N=2, local_ratio=0.5, max_cycles=25, continuous_actio
 
 obs_space = env.observation_space('agent_0').shape
 act_space = env.action_space('agent_0').n
-episodes = 200
+episodes = 10
 loss = train_rial(episodes, obs_space, act_space, batch_size=batch_size)
 
         
