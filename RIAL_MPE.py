@@ -9,8 +9,12 @@ from tensorflow.keras.layers import Dense, GRUCell, RNN, Embedding, Add, Concate
 from tensorflow.keras.optimizers import RMSprop
 from tensorflow.keras.activations import relu, linear
 import numpy as np
+import os
+import imageio
 import PIL
 from PIL import Image
+import PIL.ImageDraw as ImageDraw
+import matplotlib.pyplot as plt   
 import random
 
 import datetime
@@ -105,9 +109,7 @@ class Agent():
     def __init__(self, state_space, action_space):
 
         self.action_space = action_space
-        #TODO: look at communication space
-        #self.message_space = Box(low=-1.0, high=2.0, shape=(action_space.n), dtype=np.float32)
-        self.message_space = Discrete(action_space).n
+        self.message_space = Discrete(3).n
         self.state_space = state_space
         self.epsilon = 0.05                # initial value of epsilon for e-greedy policy
         self.gamma = 1                  # discount factor
@@ -118,7 +120,6 @@ class Agent():
         self.message_model = QNet(self.action_space, self.hidden_space)
         self.t_message_model = QNet(self.action_space, self.hidden_space)
         self.mse_loss = tf.keras.losses.MeanSquaredError()
-        #self.update_target_networks()
 
         log_dir = "logs/fit/" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
         self.tensorboard_callback = tf.keras.callbacks.TensorBoard(log_dir=log_dir, histogram_freq=1)
@@ -138,23 +139,6 @@ class Agent():
         # use softmax to turn logit into probabilities
         return np.argmax(tf.nn.softmax(act_values[0])), [hidden_1.numpy(), hidden_2.numpy()]
 
-    def choose_first_action(self):
-        '''
-        choose an action based on the epsilon-greedy policy for the first step
-        '''
-        #TODO make it work with model
-        '''
-        last_action = np.asarray([0])
-        last_message = np.asarray([0])
-        hidden_action = np.asarray([[]])
-        hidden_message = np.asarray([[]])
-        action = np.expand_dims(action, axis=0)
-        act_values, hidden_1, hidden_2 = self.action_model.predict((next_state, action, last_m, hidden, agent_ind))
-        # use softmax to turn loit into probabilities
-        return np.argmax(tf.nn.softmax(act_values[0])), [hidden_1, hidden_2]
-        '''
-        return random.randrange(self.action_space)
-
     def choose_message(self, next_state, action, message, hidden, agent_ind):
         '''
         choose a message based on the epsilon-greedy policy
@@ -167,18 +151,6 @@ class Agent():
         input = tuple([np.asarray([next_state]), to_ext_numpy(action), to_ext_numpy(message), np.asarray([agent_ind])] + [hidden])
         m_values, hidden_1, hidden_2 = self.message_model(input, training=False)
         return np.argmax(tf.nn.softmax(m_values[0])), [hidden_1.numpy(), hidden_2.numpy()]
-
-    def choose_first_message(self):
-        '''
-        choose a message based on the epsilon-greedy policy
-        '''
-        '''if np.random.rand() <= self.epsilon:
-            
-        #message = np.expand_dims(message, axis=0)
-        m_values, hidden_1, hidden_2 = self.message_model.predict((next_state, action, message, hidden, agent_ind))
-        return np.argmax(tf.nn.softmax(m_values[0])), [hidden_1, hidden_2]
-        '''
-        return random.randrange(self.message_space)
 
     def update(self, memory, batch_size=5):
         '''
@@ -240,12 +212,58 @@ def to_ext_numpy(feature):
     '''
     return np.expand_dims(np.asarray([feature]), axis=0)
 
+def render_one_episode(rial, episode):
+    frames = []
+    env.reset()
+    test_memory = []
+    done = False
+    start = True
+    last_message = 0
+    last_action = 0
+    score = 0
+    for agent in env.agent_iter():
+        if done:
+            break
+        agent_ind = [int(agent[-1])]
+        state = env.last(observe=True)[0]
+            
+        # if the episode starts, there is no memory from last states:
+        if start:
+            message = rial.choose_first_message()
+            action = rial.choose_first_action()
+            hidden_message = None
+            hidden_action = None
+            start = False
+        else:
+            last_action = test_memory[-1][1]
+            last_message = test_memory[-1][2]
+            hidden_message = test_memory[-1][5]
+            hidden_action = test_memory[-1][6]
+
+            message, hidden_message = rial.choose_message(state,last_action, last_message, hidden_message, agent_ind)
+            action, hidden_action = rial.choose_action(state,last_action, last_message, hidden_action, agent_ind)
+
+        env.step(action)
+        next_state, reward, done, _ = env.last(observe=True)
+        score += reward
+        #save each feature as list, not numpy array
+        test_memory.append([state.tolist(), action, message, reward, next_state.tolist(), hidden_message, hidden_action, done, agent_ind])
+        frame = env.render(mode='rgb_array')
+        frames.append(Image.fromarray(frame))
+    env.close()
+    print("test score: ", score)
+
+    path_name = "random_agent_episode_" + str(episode) + ".gif"
+    imageio.mimwrite(os.path.join('./videos/', path_name), frames)
+    
+
+
 
 def train_rial(episode, obs_space, act_space, batch_size):
     loss = []
     rial = Agent(obs_space, act_space)
     for e in range(episode):
-        print("episode: ", e)
+        print("episode: ", e+1)
         # memory should have shape (batch_size, timesteps, episode_info)
         memory = []
         b_score = 0
@@ -255,9 +273,10 @@ def train_rial(episode, obs_space, act_space, batch_size):
             env.reset()
             score = 0
             done = False
-            start = True
-            last_message = None
-            last_action = None
+            hidden_message = None
+            hidden_action = None
+            last_message = 0
+            last_action = 0
             batch_memory = []
             # env.agent_iter iterates over the two agents until both are finished or max_cycles is reached
             step = 1
@@ -267,22 +286,16 @@ def train_rial(episode, obs_space, act_space, batch_size):
                     break
                 agent_ind = [int(agent[-1])]
                 state = env.last(observe=True)[0]
-            
-                # if the episode starts, there is no memory from last states:
-                if start:
-                    message = rial.choose_first_message()
-                    action = rial.choose_first_action()
-                    hidden_message = None
-                    hidden_action = None
-                    start = False
-                else:
+
+                # only get history if there is history
+                if len(batch_memory) > 0:
                     last_action = batch_memory[-1][1]
                     last_message = batch_memory[-1][2]
                     hidden_message = batch_memory[-1][5]
                     hidden_action = batch_memory[-1][6]
 
-                    message, hidden_message = rial.choose_message(state,last_action, last_message, hidden_message, agent_ind)
-                    action, hidden_action = rial.choose_action(state,last_action, last_message, hidden_action, agent_ind)
+                message, hidden_message = rial.choose_message(state,last_action, last_message, hidden_message, agent_ind)
+                action, hidden_action = rial.choose_action(state,last_action, last_message, hidden_action, agent_ind)
 
                 env.step(action)
                 next_state, reward, done, _ = env.last(observe=True)
@@ -301,44 +314,11 @@ def train_rial(episode, obs_space, act_space, batch_size):
         print("episode: {}/{}, score: {}".format(e, episode, b_score))
         loss.append(b_score)
 
-        if e % 5 == 0 :
-            # TODO
+        if (e+1) % 2 == 0 :
             print("100 episodes reached")
             rial.update_target_networks()
-            # show one episode in one environment for visualization of training
-            frame_list = []
-            env.reset()
-            test_memory = []
-            for agent in env.agent_iter():
-                if done:
-                    break
-                agent_ind = [int(agent[-1])]
-                state = env.last(observe=True)[0]
-            
-                # if the episode starts, there is no memory from last states:
-                if start:
-                    message = rial.choose_first_message()
-                    action = rial.choose_first_action()
-                    hidden_message = None
-                    hidden_action = None
-                    start = False
-                else:
-                    last_action = test_memory[-1][1]
-                    last_message = test_memory[-1][2]
-                    hidden_message = test_memory[-1][5]
-                    hidden_action = test_memory[-1][6]
-
-                message, hidden_message = rial.choose_message(state.tolist(),last_action, last_message, hidden_message, agent_ind)
-                action, hidden_action = rial.choose_action(state,last_action, last_message, hidden_action, agent_ind)
-
-                env.step(action)
-                next_state, reward, done, _ = env.last(observe=True)
-                score += reward
-                test_memory.append([state.tolist(), action, message, reward, next_state.tolist(), hidden_message, hidden_action, done, agent_ind])
-                step += 1
-
-                env.render(mode='rgb_array')
-
+            # TODO:show one episode in one environment for visualization of training
+            #render_one_episode(rial, e)
 
         # Average score of last 100 episode
         is_solved = np.mean(loss[-100:])
