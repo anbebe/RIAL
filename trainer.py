@@ -1,8 +1,10 @@
+from cgi import test
 from RIAL_Agent import Agent
 from pettingzoo.mpe import simple_spread_v2
 import numpy as np
 import os
 import imageio
+import time
 from PIL import Image
 
 
@@ -48,42 +50,40 @@ def sample_trajectory(rial, episode, render=False):
         imageio.mimwrite(os.path.join('./videos/', path_name), frames)
 
     return batch_memory, score
-    
 
 
 
-def train_rial(episode, obs_space, act_space, batch_size):
+def train_rial(epochs, episode, obs_space, act_space, batch_size):
     loss = []
     rial = Agent(obs_space, act_space)
-    for e in range(episode):
-        print("episode: ", e+1)
-        # memory should have shape (batch_size, timesteps, episode_info)
-        memory = []
-        score = 0
-        #TODO: reset agents?
-        # sample batch size through finishing this amount of episodes
-        for b in range(batch_size):
-            b_memory, b_score = sample_trajectory(rial, e)
-            score += b_score
-            memory.append(b_memory)
+    for epoch in range(epochs):
+        print("epoch ", epoch)
+        start_time = time.time()
+        for e in range(episode):
+            # memory should have shape (batch_size, timesteps, episode_info)
+            memory = []
+            score = 0
+            #TODO: reset agents?
+            # sample batch size through finishing this amount of episodes
+            for b in range(batch_size):
+                b_memory, b_score = sample_trajectory(rial, e)
+                score += b_score
+                memory.append(b_memory)
 
-        score = score/batch_size
-
-        print("----- begin update ------")
-        a_loss, m_loss = rial.update(memory, batch_size=batch_size)
+            score = score/batch_size
+            a_loss, m_loss = rial.update(memory, batch_size=batch_size)
             
-        print("episode: {}/{}, score: {}".format(e, episode, score))
-        loss.append(score)
+            print("episode: {}/{}, score: {}".format(e, episode, score))
+            loss.append(score)
+            
+            # update target networks after 100 episodes
+            if (e) % 2 == 0 :
+                rial.update_target_networks()
+        rial.display_metrics()
+        test_data, test_score = sample_trajectory(rial, e)
+        # TODO:show one episode in one environment for visualization of training
+        print("epoch processed in {}".format(time.time() - start_time))
 
-        if (e+1) % 2 == 0 :
-            print("100 episodes reached")
-            rial.update_target_networks()
-            # TODO:show one episode in one environment for visualization of training
-            # _, score sample_trajectory(rial, e, render=True)
-
-        # Average score of last 100 episode
-        is_solved = np.mean(loss[-100:])
-        print("Average over last 100 episode: {0:.2f} \n".format(is_solved))
     return loss
 
 
@@ -94,5 +94,7 @@ if __name__ == "__main__":
 
     obs_space = env.observation_space('agent_0').shape
     act_space = env.action_space('agent_0').n
-    episodes = 10
-    loss = train_rial(episodes, obs_space, act_space, batch_size=batch_size)
+    # 5000 episodes in total - 20 epochs, 250 epsidoes
+    episodes = 5 # 5000
+    epochs = 2
+    loss = train_rial(epochs, episodes, obs_space, act_space, batch_size=batch_size)

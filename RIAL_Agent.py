@@ -1,6 +1,7 @@
 from model import RIAL
 from gym.spaces import Discrete
 import tensorflow as tf
+from tensorflow import keras
 import numpy as np
 import random
 import datetime
@@ -24,6 +25,11 @@ class Agent():
         self.message_model = RIAL(self.action_space, self.hidden_space)
         self.t_message_model = RIAL(self.action_space, self.hidden_space)
         self.mse_loss = tf.keras.losses.MeanSquaredError()
+        self.train_action_metric = keras.metrics.MeanSquaredError()
+        self.train_message_metric = keras.metrics.MeanSquaredError()
+        self.eval_action_metric = keras.metrics.MeanSquaredError()
+        self.eval_message_metric = keras.metrics.MeanSquaredError()
+
 
         log_dir = "logs/fit/" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
         self.tensorboard_callback = tf.keras.callbacks.TensorBoard(log_dir=log_dir, histogram_freq=1)
@@ -98,6 +104,7 @@ class Agent():
 
             gradients = tape.gradient(a_loss, self.action_model.trainable_variables)
             self.action_model.optimizer.apply_gradients(zip(gradients, self.action_model.trainable_variables))
+            self.train_action_metric.update_state(targets, exp_q)
                 
             with tf.GradientTape() as tape:   
                 pred, _, _ = self.t_message_model((next_states, actions, messages, agent_inds, hidden_message))
@@ -109,6 +116,7 @@ class Agent():
 
             gradients = tape.gradient(m_loss, self.message_model.trainable_variables)
             self.message_model.optimizer.apply_gradients(zip(gradients, self.message_model.trainable_variables))
+            self.train_message_metric.update_state(targets, exp_q)
 
         return a_loss, m_loss
 
@@ -117,6 +125,15 @@ class Agent():
         self.t_action_model.set_weights(self.action_model.get_weights())
         self.t_message_model.set_weights(self.message_model.get_weights())
 
+    def display_metrics(self):
+        action_acc = self.train_action_metric.result()
+        message_acc = self.train_message_metric.result()
+        # Display metrics at the end of each epoch
+        print("Training acc for actions over epoch: %.4f" % (float(action_acc),))
+        print("Training acc for messages over epoch: %.4f" % (float(message_acc),))
+        # Reset training metrics at the end of each epoch
+        self.train_action_metric.reset_states()
+        self.train_message_metric.reset_states()
 
 
         
