@@ -11,28 +11,36 @@ class Agent():
 
     """ Implementation of deep q learning algorithm """
 
-    def __init__(self, state_space, action_space):
+    def __init__(self, state_space, action_space, args):
 
         self.action_space = action_space
         self.message_space = Discrete(3).n
         self.state_space = state_space
-        self.epsilon = 0.05                # initial value of epsilon for e-greedy policy
-        self.gamma = 1                  # discount factor
-        self.lr = 0.0005                   # learning rate of the model
+        self.epsilon = args.epsilon                # initial value of epsilon for e-greedy policy
+        self.gamma = args.discount_factor                  # discount factor
         self.hidden_space = (100)           # size of hidden state from rnn model
-        self.action_model = RIAL(self.action_space, self.hidden_space)
-        self.t_action_model = RIAL(self.action_space, self.hidden_space)
-        self.message_model = RIAL(self.action_space, self.hidden_space)
-        self.t_message_model = RIAL(self.action_space, self.hidden_space)
+
+        if args.load_model:
+            self.load_models(args.action_model_dir, args.message_model_dir)
+        else:
+            self.action_model = RIAL(self.action_space, self.hidden_space, lr=args.learning_rate, moment=args.momentum)
+            self.t_action_model = RIAL(self.action_space, self.hidden_space, lr=args.learning_rate, moment=args.momentum)
+            self.message_model = RIAL(self.action_space, self.hidden_space, lr=args.learning_rate, moment=args.momentum)
+            self.t_message_model = RIAL(self.action_space, self.hidden_space, lr=args.learning_rate, moment=args.momentum)
+
         self.mse_loss = tf.keras.losses.MeanSquaredError()
+
         self.train_action_metric = keras.metrics.MeanSquaredError()
         self.train_message_metric = keras.metrics.MeanSquaredError()
         self.eval_action_metric = keras.metrics.MeanSquaredError()
         self.eval_message_metric = keras.metrics.MeanSquaredError()
 
+        self.action_model.compile(optimizer=self.action_model.optimizer, loss=self.mse_loss)
+        self.t_action_model.compile(optimizer=self.t_action_model.optimizer, loss=self.mse_loss)
+        self.message_model.compile(optimizer=self.message_model.optimizer, loss=self.mse_loss)
+        self.t_message_model.compile(optimizer=self.t_message_model.optimizer, loss=self.mse_loss)
 
-        log_dir = "logs/fit/" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-        self.tensorboard_callback = tf.keras.callbacks.TensorBoard(log_dir=log_dir, histogram_freq=1)
+
 
 
     def to_ext_numpy(self, feature):
@@ -135,5 +143,16 @@ class Agent():
         self.train_action_metric.reset_states()
         self.train_message_metric.reset_states()
 
+    def save_models(self, dir):
+        self.action_model.save(dir+"action", include_optimizer=True)
+        self.message_model.save(dir+"message", include_optimizer=True)
+
+    def load_models(self, a_dir, m_dir):
+        print("start load")
+        self.action_model = keras.models.load_model(a_dir)
+        self.t_action_model = keras.models.load_model(a_dir)
+        self.message_model = keras.models.load_model(m_dir)
+        self.t_message_model = keras.models.load_model(m_dir)
+        print("end load")
 
         

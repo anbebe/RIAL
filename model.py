@@ -8,7 +8,7 @@ from tensorflow.keras.activations import relu, linear
 
 
 class RIAL(tf.keras.Model):
-    def __init__(self, action_space, hidden_size):
+    def __init__(self, action_space, hidden_size, lr, moment):
         '''
         RNN that maintains an internal state h, an input network producing a task embedding z and
         an output network for the q-values
@@ -46,7 +46,7 @@ class RIAL(tf.keras.Model):
         self.q_net.add(Dense(64, activation='relu')) 
         self.q_net.add(Dense(action_space, activation='relu'))
 
-        self.optimizer = RMSprop(learning_rate=0.0005, momentum=0.95, epsilon=0.05)
+        self.optimizer = RMSprop(learning_rate=lr, momentum=moment)
 
 
     @tf.function
@@ -56,7 +56,7 @@ class RIAL(tf.keras.Model):
         each should have shape [ batch_size, specific ]
         instead: hidden states from last timestep for both rnn cells
         '''
-        batch_size = input[0].shape[0]
+        #batch_size = input[0].shape[0]
         state = input[0]
         last_act = input[1]
         last_m = input[2]
@@ -76,8 +76,8 @@ class RIAL(tf.keras.Model):
         agent = tf.cast(agent, 'float')
         agent = self.emb_ind(agent)
 
-        last_act = tf.reshape(last_act, [batch_size,128])
-        agent =  tf.reshape(agent, [batch_size,128])
+        last_act = tf.reshape(last_act, [-1,128])
+        agent =  tf.reshape(agent, [-1,128])
         
         z = self.add([x, last_act, last_m, agent])
 
