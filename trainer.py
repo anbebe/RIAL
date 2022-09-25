@@ -117,7 +117,7 @@ def train_rial(env, epochs, episode, obs_space, act_space, batch_size, args):
                 memory.append(b_memory)
 
             score = score/batch_size
-            a_loss, m_loss = rial.update(memory, batch_size=batch_size)
+            a_loss, m_loss = rial.update(memory)
             
             print("episode: {}/{}, score: {}".format(e, episode, score))
             loss.append(score)
