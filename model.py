@@ -1,9 +1,8 @@
 import numpy as np
 import tensorflow as tf
-from tensorflow.keras import Sequential, Model
-from tensorflow.keras.layers import Dense, GRUCell, RNN, Embedding, Add, Concatenate, BatchNormalization
+from tensorflow.keras import Sequential
+from tensorflow.keras.layers import Dense, GRUCell, Embedding, Add, Concatenate, BatchNormalization
 from tensorflow.keras.optimizers import RMSprop
-from tensorflow.keras.activations import relu, linear
 
 
 
@@ -32,6 +31,7 @@ class RIAL(tf.keras.Model):
         # embedding for agent index
         self.emb_ind = Embedding(input_dim=2, output_dim= 128)
 
+        # produce state embedding as input for rnn through element-wise summation of the further processed inputs
         self.add = Add(dynamic=True)
         self.concat = Concatenate(dynamic=True)
 
@@ -52,9 +52,8 @@ class RIAL(tf.keras.Model):
     @tf.function
     def call(self, input):
         '''
-        input: (observation, last_action, last_message, agent_ind)
-        each should have shape [ batch_size, specific ]
-        instead: hidden states from last timestep for both rnn cells
+        input: features: (observation, last_action, last_message, agent id, hidden states) with
+        each feature as first dimension the batch_size
         '''
         #batch_size = input[0].shape[0]
         state = input[0]

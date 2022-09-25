@@ -3,16 +3,36 @@ from pettingzoo.mpe import simple_spread_v2
 import argparse
 import time
 import os
-import pathlib
 
 parser = argparse.ArgumentParser()
 
 
 def sample_trajectory(env, rial, test=False, render=False):
+    '''
+    Samples one episode for the given environment using the model from the agent as policy with
+    the agents taking actions one after one.
+    In the test case load the same scenario, else a random one is used. In the render case,
+    each step of one agent is rendered and shown in a pygame window.
+    Parameters:
+
+        env:        the already existing environment
+        rial:       RIAL_Agent
+                    the common agent class, that contains the shared models for each agent
+        test:       bool
+                    indicates the test case
+        render:     bool
+                    indicates the render case
+
+    Returns:
+        memory containing states, actions, messages, rewards, next_states, hidden states for message rnn,
+        hidden states for message action, dones, indices of the agents for all timesteps in the episode
+    '''
+    # for test case: use the same scenario, else random one
     if test:
         env.reset(seed=100)
     else:
         env.reset()
+
     score = 0
     done = False
     hidden_message = None
@@ -20,6 +40,7 @@ def sample_trajectory(env, rial, test=False, render=False):
     last_message = 0
     last_action = 0
     batch_memory = []
+
     # env.agent_iter iterates over the two agents until both are finished or max_cycles is reached
     for agent in env.agent_iter():
 
@@ -35,21 +56,51 @@ def sample_trajectory(env, rial, test=False, render=False):
             hidden_message = batch_memory[-1][5]
             hidden_action = batch_memory[-1][6]
 
+        # use the model as policy for choosing action and message and save hidden states of the rnn cells
         message, hidden_message = rial.choose_message(state,last_action, last_message, hidden_message, agent_ind)
         action, hidden_action = rial.choose_action(state,last_action, last_message, hidden_action, agent_ind)
-
         env.step(action)
+
+        # render the actions taken by the agents for visualization
         if render:
             env.render()
             time.sleep(0.1)
         next_state, reward, done, _ = env.last(observe=True)
         score += reward
+        # save the data as list, for further processing in the update
         batch_memory.append([state.tolist(), action, message, reward, next_state.tolist(), hidden_message, hidden_action, done, agent_ind])
     return batch_memory, score
 
 
 
 def train_rial(env, epochs, episode, obs_space, act_space, batch_size, args):
+    '''
+    Creates the Agent for training and trains the model for given epochs, episodes and batch_size.
+    To generate a batch of samples for the update, the model samples whole trajectories due to the
+    Pettingzoo API of agent.iter(), which stops when an episode is done.
+    The target networks are updated after given time and the model is evaluated after each epoch on
+    the same scenario for better visualization of training process.
+
+    Parameters:
+
+        env:        the already existing environment
+        epochs:     int
+                    amount of epochs to train, consisting of number of episodes
+        episodes:   int
+                    amount of episodes in each epoch, where a batch of samples is
+                    generated and used for an update of the RIAL models
+        obs-space:  [int]
+                    shape of the observation space from the environment
+        obs-space:  int
+                    number of possible actions in the environment (possible, because the action_space is discrete)
+        batch_size: number of samples for one batch
+        args:       given arguments, including arguments for the model and agent
+
+    Returns:
+
+        loss over the whole training, saved in a list
+
+    '''
     loss = []
     rial = Agent(obs_space, act_space, args)
     for epoch in range(epochs):
@@ -74,8 +125,10 @@ def train_rial(env, epochs, episode, obs_space, act_space, batch_size, args):
             # update target networks after 100 episodes
             if (e) % args.update_target_network == 0 :
                 rial.update_target_networks()
+
+        # evaluate model through metrics and visualization of the steps taken in test scenario
         rial.display_metrics()
-        test_data, test_score = sample_trajectory(env, rial, render=True)
+        test_data, test_score = sample_trajectory(env, rial, test=True, render=True)
         print("epoch processed in {}".format(time.time() - start_time))
     # save models at the end of training
     rial.save_models(args.log_dir)
@@ -83,12 +136,14 @@ def train_rial(env, epochs, episode, obs_space, act_space, batch_size, args):
     return loss
 
 def test_rial(env, obs_space, act_space, args):
+    '''
+    Test a given or if not given, random model for one epsiode, that's always the same, and return the score.
+    '''
     rial = Agent(obs_space, act_space, args)
     _, score = sample_trajectory(env, rial, test=True, render=True)
     print("Test score: ", score)
 
 def main(args):
-
     #check if given directories for the models are valid
     if args.load_model:
         if not os.path.isdir(args.action_model_dir):
