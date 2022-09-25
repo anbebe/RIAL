@@ -8,8 +8,11 @@ import pathlib
 parser = argparse.ArgumentParser()
 
 
-def sample_trajectory(env, rial, render=False):
-    env.reset()
+def sample_trajectory(env, rial, test=False, render=False):
+    if test:
+        env.reset(seed=100)
+    else:
+        env.reset()
     score = 0
     done = False
     hidden_message = None
@@ -79,6 +82,11 @@ def train_rial(env, epochs, episode, obs_space, act_space, batch_size, args):
 
     return loss
 
+def test_rial(env, obs_space, act_space, args):
+    rial = Agent(obs_space, act_space, args)
+    _, score = sample_trajectory(env, rial, test=True, render=True)
+    print("Test score: ", score)
+
 def main(args):
 
     #check if given directories for the models are valid
@@ -102,7 +110,12 @@ def main(args):
     obs_space = env.observation_space('agent_0').shape
     act_space = env.action_space('agent_0').n
 
-    loss = train_rial(env, args.epochs, args.episodes, obs_space, act_space, batch_size=args.batch_size, args=args)
+    if args.mode == "train":
+        loss = train_rial(env, args.epochs, args.episodes, obs_space, act_space, batch_size=args.batch_size, args=args)
+    elif args.mode == "test":
+        test_rial(env, obs_space, act_space, args)
+    else:
+        print("No valid mode. Try train or test")
     env.close()
 
 
