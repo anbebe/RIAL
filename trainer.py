@@ -3,6 +3,11 @@ from pettingzoo.mpe import simple_spread_v2
 import argparse
 import time
 import os
+import numpy as np
+import matplotlib.pyplot as plt
+import pygame
+from pygame.locals import *
+
 
 parser = argparse.ArgumentParser()
 
@@ -63,6 +68,7 @@ def sample_trajectory(env, rial, test=False, render=False):
 
         # render the actions taken by the agents for visualization
         if render:
+            pygame.event.get()
             env.render()
             time.sleep(0.1)
         next_state, reward, done, _ = env.last(observe=True)
@@ -132,6 +138,21 @@ def train_rial(env, epochs, episode, obs_space, act_space, batch_size, args):
         print("epoch processed in {}".format(time.time() - start_time))
     # save models at the end of training
     rial.save_models(args.log_dir)
+        
+   
+    # Plot statistics
+    moving_average_range = 50
+    x_axis = np.arange(len(loss))
+    plt.figure(1, figsize=(16, 9))
+    plt.plot(x_axis, loss, label='Episode score')
+    moving_averages = [np.mean(loss[i - (moving_average_range - 1):i + 1]) if i >= (moving_average_range - 1) else np.mean(loss[:i + 1]) for i in range(len(loss))]
+    plt.plot(x_axis, moving_averages, color='red', label=f'{moving_average_range}-episode moving average')
+    plt.title('Training Performance')
+    plt.xlabel('Episode')
+    plt.ylabel('Score')
+    plt.legend(loc='upper left')
+    plt.savefig('rewards.jpg')
+    plt.show()
 
     return loss
 
@@ -184,7 +205,7 @@ if __name__ == "__main__":
     parser.add_argument('--batch_size', default=32, type=int)
     parser.add_argument('--agents', default=2, type=int)
     parser.add_argument('--max_episode_length', default=25, type=int)
-    parser.add_argument('--update_target_network', default=100 , type=int)
+    parser.add_argument('--update_target_network', default=50 , type=int)
 
     parser.add_argument('--epsilon', default=0.05, type=float)
     parser.add_argument('--discount_factor', default=1.0, type=float)
@@ -202,4 +223,3 @@ if __name__ == "__main__":
     main(args)
 
     
-
